@@ -8,11 +8,119 @@
 #  assertCapturedError
 #}
 
+testFlatmapStream() {
+  compile "flatmap-stream"
+  assertCaptured "flatmap-stream module has been removed from the npm registry"
+  assertCaptured "why-am-i-seeing-npm-404-errors"
+  assertCapturedError
+}
+
+testBuildScriptWarning() {
+  local env_dir=$(mktmpdir)
+  local metrics_log=$(mktemp)
+  echo "$metrics_log" > $env_dir/BUILDPACK_LOG_FILE
+
+  compile "build-script" "$(mktmpdir)" $env_dir
+
+  # Without opting in, having a build script will display a warning
+  assertCaptured "On March 11, 2019 Heroku will begin executing the \"build\" script defined in package.json"
+  assertCaptured "https://help.heroku.com/P5IMU3MP/heroku-node-js-build-script-change-faq"
+
+  # make sure metrics are being captured as we expect
+  assertFileContains "count#buildpack.nodejs.affected-by-build-change=1" "$metrics_log"
+  assertFileNotContains "affected-by-build-change-opted-in" "$metrics_log"
+
+  # We shouldn't see the opt-in success message
+  assertNotCaptured "Opting in to new default build script behavior"
+  assertCapturedSuccess
+}
+
+testBuildScriptBehavior() {
+  # opt in to new build script behavior
+  cache=$(mktmpdir)
+  env_dir=$(mktmpdir)
+  echo "true" > $env_dir/NEW_BUILD_SCRIPT_BEHAVIOR
+
+  # The 'build' script is run by default
+  compile "build-script" $cache $env_dir
+  assertCaptured "Running build"
+  assertCapturedSuccess
+
+  # the 'heroku-postbuild' script takes precedence over the 'build' script
+  compile "build-script-override"
+  assertCaptured "Detected both \"build\" and \"heroku-postbuild\" scripts"
+  assertCaptured "Running heroku-postbuild"
+  assertCapturedSuccess
+}
+
+testBuildScriptOptIn() {
+  local env_dir=$(mktmpdir)
+  local metrics_log=$(mktemp)
+  echo "$metrics_log" > $env_dir/BUILDPACK_LOG_FILE
+
+  compile "build-script-opt-in" "$(mktmpdir)" $env_dir
+  assertCaptured "Running build"
+  assertCaptured "Opting in to new default build script behavior"
+  # We shouldn't see this warning once they opt-in
+  assertNotCaptured "Warning: On March 11, 2019 Heroku will begin executing the \"build\" script defined in package.json by default"
+  assertNotCaptured "https://help.heroku.com/P5IMU3MP/heroku-node-js-build-script-change-faq"
+
+  # make sure metrics are being captured as we expect
+  assertFileContains "count#buildpack.nodejs.affected-by-build-change=1" "$metrics_log"
+  assertFileContains "count#buildpack.nodejs.affected-by-build-change-opted-in=1" "$metrics_log"
+
+  assertCapturedSuccess
+}
+
+testBuildScriptOptInYarn() {
+  compile "build-script-opt-in-yarn"
+  assertCaptured "Running build (yarn)"
+  assertCaptured "build hook message"
+  assertCapturedSuccess
+}
+
+testPreferEmptyHerokuPostbuildOverBuild() {
+  compile "empty-heroku-postbuild"
+  assertCaptured "Detected both \"build\" and \"heroku-postbuild\" scripts"
+  assertCaptured "Running heroku-postbuild"
+  assertNotCaptured "build hook message"
+  assertCapturedSuccess
+}
+
+testEmptyHerokuPostbuildWithYarn() {
+  compile "empty-heroku-postbuild-yarn"
+  assertCaptured "Running heroku-postbuild (yarn)"
+  assertNotCaptured "build hook message"
+  assertNotCaptured "Script must exist"
+  assertCapturedSuccess
+}
+
+testPrePostBuildScripts() {
+  compile "pre-post-build-scripts"
+  assertCaptured "Running heroku-prebuild"
+  assertCaptured "echo heroku-prebuild hook message"
+  assertCaptured "Running heroku-postbuild"
+  assertCaptured "echo heroku-postbuild hook message"
+  assertCapturedSuccess
+
+  compile "stable-node"
+  assertNotCaptured "Running heroku-prebuild"
+  assertNotCaptured "Running heroku-postbuild"
+  assertCapturedSuccess
+}
+
+testYarnRun() {
+  compile "yarn-run"
+  assertCaptured "Running heroku-postbuild (yarn)"
+  assertCaptured "foobar"
+  assertCapturedSuccess
+}
+
 testNoVersion() {
   compile "no-version"
   assertCaptured "engines.node (package.json):  unspecified"
-  assertCaptured "Resolving node version 8.x"
-  assertCaptured "Downloading and installing node 8."
+  assertCaptured "Resolving node version 10.x"
+  assertCaptured "Downloading and installing node 10."
   assertCapturedSuccess
 }
 
@@ -23,18 +131,16 @@ testDisableCache() {
   echo "true" > $env_dir/NODE_VERBOSE
   compile "node-modules-cache-1" $cache $env_dir
   assertCaptured "lodash@1.0.0"
-  assertEquals "1" "$(ls -1 $cache/node/node_modules | grep lodash | wc -l | tr -d ' ')"
+  assertEquals "1" "$(ls -1 $cache/node/cache/node_modules | grep -c lodash | tr -d ' ')"
   assertCapturedSuccess
 
   compile "node-modules-cache-2" $cache $env_dir
   assertCaptured "lodash@1.0.0"
-  assertCaptured "Saving 2 cacheDirectories"
   assertCapturedSuccess
 
   echo "false" > $env_dir/NODE_MODULES_CACHE
   compile "node-modules-cache-2" $cache $env_dir
   assertCaptured "lodash@1.3.1"
-  assertNotCaptured "Saving 2 cacheDirectories"
   assertCapturedSuccess
 }
 
@@ -42,11 +148,21 @@ testNodeModulesCached() {
   cache=$(mktmpdir)
 
   compile "caching" $cache
-  assertCaptured "Saving 2 cacheDirectories (default)"
   assertCaptured "- node_modules"
-  assertCaptured "- bower_components (nothing to cache)"
-  assertEquals "1" "$(ls -1 $cache/node/node_modules | grep express | wc -l | tr -d ' ')"
+  assertEquals "1" "$(ls -1 $cache/node/cache/node_modules | grep -c express | tr -d ' ')"
   assertCapturedSuccess
+}
+
+testSetBuildEnv() {
+  cache=$(mktmpdir)
+  env_dir=$(mktmpdir)
+
+  compile "print-node-options"
+  assertCaptured "NODE_OPTIONS=--max_old_space_size=2560"
+
+  echo "--max_old_space_size=1234" > $env_dir/NODE_OPTIONS
+  compile "print-node-options" $cache $env_dir
+  assertCaptured "NODE_OPTIONS=--max_old_space_size=1234"
 }
 
 testYarn() {
@@ -61,12 +177,17 @@ testYarnCacheDirectory() {
   local cache=$(mktmpdir)
   local env_dir=$(mktmpdir)
   local cache_dir=$(mktmpdir)
-  echo "${cache_dir}/yarn"> "$env_dir"/YARN_CACHE_FOLDER
+  echo "${cache_dir}/yarn"> "$env_dir/YARN_CACHE_FOLDER"
   compile "yarn" $cache $env_dir
   # These will be created if yarn is using the directory for its cache
+
   assertDirectoryExists ${cache_dir}/yarn
-  assertDirectoryExists ${cache_dir}/yarn/v1
-  assertDirectoryExists ${cache_dir}/yarn/v1/npm-lodash-4.16.4-01ce306b9bad1319f2a5528674f88297aeb70127
+  # yarn frequently bumps the version number used in its cache
+  # so use a wildcard here to prevent frequent CI failures
+  ls ${cache_dir}/yarn/v*/npm-lodash-4.16.4-01ce306b9bad1319f2a5528674f88297aeb70127
+
+  # assert that the above ls command exited successfully, which only happens if the file exists
+  assertEquals "0" "$?"
   assertCapturedSuccess
 }
 
@@ -86,16 +207,16 @@ testBuildWithCache() {
   cache=$(mktmpdir)
 
   compile "stable-node" $cache
-  assertCaptured "Skipping cache restore (not-found)"
-  assertEquals "1" "$(ls -1 $cache/node/node_modules | grep hashish | wc -l | tr -d ' ')"
+  assertNotCaptured "Restoring cache"
+  assertEquals "1" "$(ls -1 $cache/node/cache/node_modules | grep -c hashish | tr -d ' ')"
   assertCapturedSuccess
 
   compile "stable-node" $cache
-  assertNotCaptured "- node_modules (not cached - skipping)"
+  assertCaptured "- node_modules"
   assertFileContains "${STACK}" "${cache}/node/signature"
   assertCapturedSuccess
 
-  rm -rf "$cache/node/node_modules"
+  rm -rf "$cache/node/cache/node_modules"
   compile "stable-node" $cache
   assertCaptured "- node_modules (not cached - skipping)"
   assertCapturedSuccess
@@ -110,7 +231,7 @@ testCacheWithPrebuild() {
   assertCapturedSuccess
 
   compile "cache-prebuild" $cache $env_dir
-  assertCaptured "Skipping cache restore (new-signature"
+  assertCaptured "Cached directories were not restored due to a change in version of node"
   assertCapturedSuccess
 }
 
@@ -155,13 +276,6 @@ testYarnSemverInvalid() {
   assertCaptured "Invalid semver requirement"
   assertCaptured "https://kb.heroku.com/why-is-my-node-js-build-failing-because-of-an-invalid-semver-requirement"
   assertCapturedError
-}
-
-testYarnRun() {
-  compile "yarn-run"
-  assertCaptured "Running heroku-postbuild (yarn)"
-  assertCaptured "foobar"
-  assertCapturedSuccess
 }
 
 testYarnEngine() {
@@ -287,20 +401,6 @@ testEnvBlacklist() {
   assertCapturedSuccess
 }
 
-testPrePostBuildScripts() {
-  compile "pre-post-build-scripts"
-  assertCaptured "Running heroku-prebuild"
-  assertCaptured "echo heroku-prebuild hook message"
-  assertCaptured "Running heroku-postbuild"
-  assertCaptured "echo heroku-postbuild hook message"
-  assertCapturedSuccess
-
-  compile "stable-node"
-  assertNotCaptured "Running heroku-prebuild"
-  assertNotCaptured "Running heroku-postbuild"
-  assertCapturedSuccess
-}
-
 testWarningsOnFailure() {
   compile "many-warnings"
   assertCaptured "troubleshooting-node-deploys"
@@ -361,8 +461,8 @@ testBuildWithUserCacheDirectoriesCamel() {
 
   compile "cache-directories-camel" $cache
   assertCaptured "- non/existent (nothing to cache)"
-  assertEquals "1" "$(ls -1 $cache/node/server | grep node_modules | wc -l | tr -d ' ')"
-  assertEquals "1" "$(ls -1 $cache/node/client | grep node_modules | wc -l | tr -d ' ')"
+  assertEquals "1" "$(ls -1 $cache/node/cache/server | grep -c node_modules | tr -d ' ')"
+  assertEquals "1" "$(ls -1 $cache/node/cache/client | grep -c node_modules | tr -d ' ')"
   assertCapturedSuccess
 
   compile "cache-directories-camel" $cache
@@ -374,35 +474,35 @@ testBuildWithUserCacheDirectoriesCamel() {
 }
 
 testConcurrency1X() {
-  LOG_CONCURRENCY=true MEMORY_AVAILABLE=512 capture $(pwd)/profile/WEB_CONCURRENCY.sh
+  LOG_CONCURRENCY=true MEMORY_AVAILABLE=512 capture "$(pwd)"/profile/WEB_CONCURRENCY.sh
   assertCaptured "Detected 512 MB available memory, 512 MB limit per process (WEB_MEMORY)"
   assertCaptured "Recommending WEB_CONCURRENCY=1"
   assertCapturedSuccess
 }
 
 testConcurrency2X() {
-  LOG_CONCURRENCY=true MEMORY_AVAILABLE=1024 capture $(pwd)/profile/WEB_CONCURRENCY.sh
+  LOG_CONCURRENCY=true MEMORY_AVAILABLE=1024 capture "$(pwd)"/profile/WEB_CONCURRENCY.sh
   assertCaptured "Detected 1024 MB available memory, 512 MB limit per process (WEB_MEMORY)"
   assertCaptured "Recommending WEB_CONCURRENCY=2"
   assertCapturedSuccess
 }
 
 testConcurrencyPerformanceM() {
-  LOG_CONCURRENCY=true MEMORY_AVAILABLE=2560 capture $(pwd)/profile/WEB_CONCURRENCY.sh
+  LOG_CONCURRENCY=true MEMORY_AVAILABLE=2560 capture "$(pwd)"/profile/WEB_CONCURRENCY.sh
   assertCaptured "Detected 2560 MB available memory, 512 MB limit per process (WEB_MEMORY)"
   assertCaptured "Recommending WEB_CONCURRENCY=5"
   assertCapturedSuccess
 }
 
 testConcurrencyPerformanceL() {
-   LOG_CONCURRENCY=true MEMORY_AVAILABLE=14336 capture $(pwd)/profile/WEB_CONCURRENCY.sh
+   LOG_CONCURRENCY=true MEMORY_AVAILABLE=14336 capture "$(pwd)"/profile/WEB_CONCURRENCY.sh
    assertCaptured "Detected 14336 MB available memory, 512 MB limit per process (WEB_MEMORY)"
    assertCaptured "Recommending WEB_CONCURRENCY=28"
    assertCapturedSuccess
 }
 
 testConcurrencyCustomLimit() {
-  LOG_CONCURRENCY=true MEMORY_AVAILABLE=1024 WEB_MEMORY=256 capture $(pwd)/profile/WEB_CONCURRENCY.sh
+  LOG_CONCURRENCY=true MEMORY_AVAILABLE=1024 WEB_MEMORY=256 capture "$(pwd)"/profile/WEB_CONCURRENCY.sh
   assertCaptured "Detected 1024 MB available memory, 256 MB limit per process (WEB_MEMORY)"
   assertCaptured "Recommending WEB_CONCURRENCY=4"
   assertCapturedSuccess
@@ -411,7 +511,7 @@ testConcurrencyCustomLimit() {
 # When /sys/fs/cgroup/memory/memory.limit_in_bytes lies and gives a ridiculous value
 # This happens on Dokku for example
 testConcurrencyTooHigh() {
-  LOG_CONCURRENCY=true MEMORY_AVAILABLE=10000000000 capture $(pwd)/profile/WEB_CONCURRENCY.sh
+  LOG_CONCURRENCY=true MEMORY_AVAILABLE=10000000000 capture "$(pwd)"/profile/WEB_CONCURRENCY.sh
   assertCaptured "Could not determine a reasonable value for WEB_CONCURRENCY"
   assertCaptured "Recommending WEB_CONCURRENCY=1"
   assertCapturedSuccess
@@ -451,7 +551,7 @@ testSignatureInvalidation() {
 
   compile "node-0.12.7" $cache
   assertCaptured "Downloading and installing node 0.12.7"
-  assertCaptured "Skipping cache restore (new-signature"
+  assertCaptured "Cached directories were not restored due to a change in version of node"
   assertCapturedSuccess
 }
 
@@ -517,11 +617,6 @@ testOldNpm() {
   assertCapturedError
 }
 
-testOldNpm2() {
-  compile "failing-build"
-  assertCaptured "This version of npm (1.4.28) has several known issues"
-}
-
 testNonexistentNpm() {
   compile "nonexistent-npm"
   assertCaptured "Unable to install npm 1.1.65"
@@ -536,7 +631,7 @@ testSameNpm() {
 
 testNpmVersionRange() {
   compile "npm-version-range"
-  assertCaptured "Bootstrapping npm 1.4.x"
+  assertCaptured "Bootstrapping npm 5.7.x"
   assertCapturedSuccess
 }
 
@@ -576,7 +671,7 @@ testDangerousRangeStar() {
   compile "dangerous-range-star"
   assertCaptured "Dangerous semver range"
   assertCaptured "Resolving node version *"
-  assertCaptured "Downloading and installing node 9."
+  assertCaptured "Downloading and installing node"
   assertCapturedError
 }
 
@@ -584,14 +679,14 @@ testDangerousRangeGreaterThan() {
   compile "dangerous-range-greater-than"
   assertCaptured "Dangerous semver range"
   assertCaptured "Resolving node version >0.4"
-  assertCaptured "Downloading and installing node 9."
+  assertCaptured "Downloading and installing node"
   assertCapturedError
 }
 
 testRangeWithSpace() {
   compile "range-with-space"
   assertCaptured "Resolving node version >= 0.8.x"
-  assertCaptured "Downloading and installing node 9."
+  assertCaptured "Downloading and installing node"
   assertCapturedSuccess
 }
 
@@ -606,8 +701,8 @@ testBuildWithUserCacheDirectories() {
 
   compile "cache-directories" $cache
   assertCaptured "Saving 2 cacheDirectories"
-  assertEquals "1" "$(ls -1 $cache/node | grep bower_components | wc -l | tr -d ' ')"
-  assertEquals "1" "$(ls -1 $cache/node | grep node_modules | wc -l | tr -d ' ')"
+  assertEquals "1" "$(ls -1 $cache/node/cache | grep -c bower_components | tr -d ' ')"
+  assertEquals "1" "$(ls -1 $cache/node/cache | grep -c node_modules | tr -d ' ')"
   assertCapturedSuccess
 
   compile "cache-directories" $cache
@@ -682,7 +777,14 @@ testDevDepenenciesWithNoPruning() {
   echo "false" > $env_dir/NPM_CONFIG_PRODUCTION
   compile "dependencies" "$(mktmpdir)" $env_dir
   assertCaptured "lodash"
-  assertCaptured "Skipping because NPM_CONFIG_PRODUCTION is not 'true'"
+  assertCaptured "Skipping because NPM_CONFIG_PRODUCTION is 'false'"
+  assertCapturedSuccess
+
+  env_dir=$(mktmpdir)
+  echo "true" > $env_dir/NPM_CONFIG_PRODUCTION
+  compile "dependencies" "$(mktmpdir)" $env_dir
+  assertNotCaptured "lodash"
+  assertCaptured "Skipping because NPM_CONFIG_PRODUCTION is 'true'"
   assertCapturedSuccess
 }
 
@@ -692,7 +794,14 @@ testDevDepenenciesWithNoPruningYarn() {
   echo "false" > $env_dir/YARN_PRODUCTION
   compile "dependencies-yarn" "$(mktmpdir)" $env_dir
   assertCaptured "lodash"
-  assertCaptured "Skipping because YARN_PRODUCTION is not 'true'"
+  assertCaptured "Skipping because YARN_PRODUCTION is 'false'"
+  assertCapturedSuccess
+
+  env_dir=$(mktmpdir)
+  echo "true" > $env_dir/YARN_PRODUCTION
+  compile "dependencies-yarn" "$(mktmpdir)" $env_dir
+  assertNotCaptured "lodash"
+  assertCaptured "Skipping because YARN_PRODUCTION is 'true'"
   assertCapturedSuccess
 }
 
@@ -815,6 +924,12 @@ testCIEnvVars() {
   assertCapturedSuccess
 }
 
+# If compile fails, test-compile should also fail
+testCICompileFails() {
+  testCompile "failing-build"
+  assertCapturedError
+}
+
 testCIEnvVarsOverride() {
   env_dir=$(mktmpdir)
   echo "banana" > $env_dir/NODE_ENV
@@ -867,13 +982,209 @@ testNpmPrune53Issue() {
   assertCapturedSuccess
 }
 
+# Avoid this issue for users with git dependencies
+# https://github.com/npm/npm/issues/19356
+testNpmPrune56Issue() {
+  compile "npm-prune-5-6-issue"
+  assertCaptured "npm 5.6.0"
+  assertCaptured "Skipping because npm 5.6.0 sometimes fails"
+  assertCaptured "https://github.com/npm/npm/issues/19356"
+  assertCapturedSuccess
+}
+
+testPluginInstallationBuildTime() {
+  # The plugin should be installed for Node 8, 9, 10
+  compile "node-8"
+  assertFileExists "${compile_dir}/.heroku/heroku-nodejs-plugin/heroku-nodejs-plugin.node"
+
+  compile "node-9"
+  assertFileExists "${compile_dir}/.heroku/heroku-nodejs-plugin/heroku-nodejs-plugin.node"
+
+  compile "node-10"
+  assertFileExists "${compile_dir}/.heroku/heroku-nodejs-plugin/heroku-nodejs-plugin.node"
+
+  # but not for earlier versions
+  compile "node-6"
+  assertFileDoesNotExist "${compile_dir}/.heroku/heroku-nodejs-plugin/heroku-nodejs-plugin.node"
+}
+
+testPluginInstallationRunTime() {
+  local env_dir=$(mktmpdir)
+  compile "node-8" "$(mktmpdir)" $env_dir
+
+  # by default $NODE_OPTIONS is unmodifed
+  executeStartup $env_dir
+  assertEquals "" "$NODE_OPTIONS"
+  cleanupStartup
+
+  # If $HEROKU_METRICS_URL is defined at run time, the script
+  # should add a require statement to $NODE_OPTIONS
+  export HEROKU_METRICS_URL=https://localhost:5000
+  executeStartup $env_dir
+  assertEquals "--require $compile_dir/.heroku/heroku-nodejs-plugin" "$NODE_OPTIONS"
+  cleanupStartup
+
+  # unless $HEROKU_SKIP_NODE_PLUGIN is defined
+  export HEROKU_METRICS_URL=https://localhost:5000
+  export HEROKU_SKIP_NODE_PLUGIN=true
+  executeStartup $env_dir
+  assertEquals "" "$NODE_OPTIONS"
+  cleanupStartup
+
+  # if $NODE_OPTIONS already exists, it will append the require command
+  export HEROKU_METRICS_URL=https://localhost:5000
+  export NODE_OPTIONS="--max-old-space-size=128"
+  executeStartup $env_dir
+  assertEquals "--max-old-space-size=128 --require $compile_dir/.heroku/heroku-nodejs-plugin" "$NODE_OPTIONS"
+  cleanupStartup
+
+  # and it will leave it unchanged if $HEROKU_SKIP_NODE_PLUGIN is defined
+  export HEROKU_METRICS_URL=https://localhost:5000
+  export NODE_OPTIONS="--max-old-space-size=128"
+  export HEROKU_SKIP_NODE_PLUGIN=true
+  executeStartup $env_dir
+  assertEquals "--max-old-space-size=128" "$NODE_OPTIONS"
+  cleanupStartup
+}
+
+testPluginInstallationUnsupportedNodeRunTime() {
+  local env_dir=$(mktmpdir)
+  compile "node-6" "$(mktmpdir)" $env_dir
+
+  # This can happen if a user opts-in to the feature but is not using a supported node version
+  export HEROKU_METRICS_URL=https://localhost:5000
+  executeStartup $env_dir
+  assertEquals "" "$NODE_OPTIONS"
+  cleanupStartup
+}
+
+testMemoryMetrics() {
+  env_dir=$(mktmpdir)
+  local metrics_log=$(mktemp)
+  echo "$metrics_log" > $env_dir/BUILDPACK_LOG_FILE
+
+  compile "pre-post-build-scripts" "$(mktmpdir)" $env_dir
+  assertFileContains "measure#buildpack.nodejs.exec.install-node-binary.time=" $metrics_log
+  assertFileContains "measure#buildpack.nodejs.exec.install-npm-binary.time=" $metrics_log
+  assertFileContains "measure#buildpack.nodejs.exec.heroku-prebuild.time=" $metrics_log
+  assertFileContains "measure#buildpack.nodejs.exec.heroku-prebuild.memory=" $metrics_log
+  assertFileContains "measure#buildpack.nodejs.exec.npm-install.time=" $metrics_log
+  assertFileContains "measure#buildpack.nodejs.exec.npm-install.memory=" $metrics_log
+  assertFileContains "measure#buildpack.nodejs.exec.heroku-postbuild.time=" $metrics_log
+  assertFileContains "measure#buildpack.nodejs.exec.heroku-postbuild.memory=" $metrics_log
+
+  # erase the metrics log
+  echo "" > $metrics_log
+  compile "yarn" "$(mktmpdir)" $env_dir
+  assertFileContains "measure#buildpack.nodejs.exec.install-node-binary.time=" $metrics_log
+  assertFileContains "measure#buildpack.nodejs.exec.install-yarn-binary.time=" $metrics_log
+  assertFileContains "measure#buildpack.nodejs.exec.yarn-install.memory=" "$metrics_log"
+  assertFileContains "measure#buildpack.nodejs.exec.yarn-install.time=" "$metrics_log"
+  # this fixture does not have pre or post-build scripts
+  assertFileNotContains "measure#buildpack.nodejs.exec.heroku-prebuild.time=" $metrics_log
+  assertFileNotContains "measure#buildpack.nodejs.exec.heroku-prebuild.memory=" $metrics_log
+  assertFileNotContains "measure#buildpack.nodejs.exec.heroku-postbuild.time=" $metrics_log
+  assertFileNotContains "measure#buildpack.nodejs.exec.heroku-postbuild.memory=" $metrics_log
+}
+
+testBuildMetaData() {
+  env_dir=$(mktmpdir)
+  local log_file=$(mktemp)
+  echo "$log_file" > $env_dir/BUILDPACK_LOG_FILE
+
+  compile "pre-post-build-scripts" "$(mktmpdir)" $env_dir
+
+  # build info
+  assertFileContains "node-package-manager=npm" $log_file
+  assertFileContains "checked-in-node-modules=false" $log_file
+  assertFileContains "has-node-lock-file=false" $log_file
+  assertFileContains "cache-status=not-found" $log_file
+  assertFileContains "node-build-success=true" $log_file
+  assertFileContains "build-time=" $log_file
+  assertFileContains "app-uuid=" $log_file
+  assertFileContains "build-uuid=" $log_file
+
+  # binary versions
+  assertFileContains "node-version-request=~0.10.0" $log_file
+  assertFileContains "npm-version-request= " $log_file
+
+  # log build scripts
+  assertFileContains "heroku-prebuild-script=\"echo heroku-prebuild hook message\"" $log_file
+  assertFileContains "heroku-postbuild-script=\"echo heroku-prebuild hook message\"" $log_file
+  assertFileContains "build-script= " $log_file
+
+  # monitor calls
+  assertFileContains "install-node-binary-memory=" $log_file
+  assertFileContains "install-node-binary-time=" $log_file
+  assertFileContains "install-npm-binary-time=" $log_file
+  assertFileContains "install-npm-binary-memory=" $log_file
+  assertFileContains "heroku-prebuild-time=" $log_file
+  assertFileContains "heroku-prebuild-memory=" $log_file
+  assertFileContains "npm-install-time=" $log_file
+  assertFileContains "npm-install-memory=" $log_file
+  assertFileContains "heroku-postbuild-time=" $log_file
+  assertFileContains "heroku-postbuild-memory=" $log_file
+  assertFileContains "npm-prune-memory=" $log_file
+  assertFileContains "npm-prune-time=" $log_file
+
+  # erase the log file
+  echo "" > $log_file
+  compile "yarn" "$(mktmpdir)" $env_dir
+
+  assertFileContains "node-package-manager=yarn" $log_file
+  assertFileContains "has-node-lock-file=true" $log_file
+  assertFileContains "yarn-version-request=1.x" $log_file
+  assertFileContains "yarn-version=1." $log_file
+  assertFileContains "install-yarn-binary-memory=" $log_file
+  assertFileContains "install-yarn-binary-time=" $log_file
+  assertFileContains "node-build-success=true" $log_file
+}
+
+testPropagateAppUUID() {
+  env_dir=$(mktmpdir)
+  local log_file=$(mktemp)
+  local cache_dir=${2:-$(mktmpdir)}
+  echo "$log_file" > $env_dir/BUILDPACK_LOG_FILE
+
+  # save the generated app-uuid for the first build
+  compile "node-10" $cache_dir $env_dir
+  assertFileContains "app-uuid=" $log_file
+  local uuid=$(cat $log_file | sed -n -e 's/^.*app-uuid=\([^ ]*\).*/\1/p')
+
+  # create a new log file
+  log_file=$(mktemp)
+  echo "$log_file" > $env_dir/BUILDPACK_LOG_FILE
+
+  # recompile with the same cache directory
+  compile "node-10" $cache_dir $env_dir
+  assertFileContains "app-uuid" $log_file
+  # make sure that the app-uuid is the same
+  assertEquals "$uuid" "$(cat $log_file | sed -n -e 's/^.*app-uuid=\([^ ]*\).*/\1/p')"
+}
+
+testBinDetectWarnings() {
+  detect "slugignore-package-json"
+  assertCapturedError "'package.json' listed in '.slugignore' file"
+  assertCapturedError "https://devcenter.heroku.com/articles/slug-compiler#ignoring-files-with-slugignore"
+
+  detect "gitignore-package-json"
+  assertCapturedError "'package.json' listed in '.gitignore' file"
+  assertCapturedError "https://devcenter.heroku.com/articles/gitignore"
+
+  detect "node-project-missing-package-json"
+  assertCapturedError "Application not supported by 'heroku/nodejs' buildpack"
+  assertCapturedError "https://devcenter.heroku.com/articles/nodejs-support#activation"
+  assertCapturedError "index.js"
+  assertCapturedError "src/"
+}
+
 # Utils
 
-pushd $(dirname 0) >/dev/null
+pushd "$(dirname 0)" >/dev/null
 popd >/dev/null
 
-source $(pwd)/test/utils
-source $(pwd)/lib/environment.sh
+source "$(pwd)"/test/utils
+source "$(pwd)"/lib/environment.sh
 
 mktmpdir() {
   dir=$(mktemp -t testXXXXX)
@@ -883,7 +1194,7 @@ mktmpdir() {
 }
 
 detect() {
-  capture $(pwd)/bin/detect $(pwd)/test/fixtures/$1
+  capture "$(pwd)"/bin/detect "$(pwd)"/test/fixtures/$1
 }
 
 compile_dir=""
@@ -895,13 +1206,57 @@ default_process_types_cleanup() {
   fi
 }
 
+detect() {
+  default_process_types_cleanup
+  bp_dir=$(mktmpdir)
+  compile_dir=$(mktmpdir)
+  cp -a "$(pwd)"/* ${bp_dir}
+  cp -a ${bp_dir}/test/fixtures/$1/. ${compile_dir}
+  capture ${bp_dir}/bin/detect ${compile_dir}
+}
+
 compile() {
   default_process_types_cleanup
   bp_dir=$(mktmpdir)
   compile_dir=$(mktmpdir)
-  cp -a $(pwd)/* ${bp_dir}
+  cp -a "$(pwd)"/* ${bp_dir}
   cp -a ${bp_dir}/test/fixtures/$1/. ${compile_dir}
   capture ${bp_dir}/bin/compile ${compile_dir} ${2:-$(mktmpdir)} $3
+}
+
+testCompile() {
+  default_process_types_cleanup
+  bp_dir=$(mktmpdir)
+  compile_dir=$(mktmpdir)
+  cp -a "$(pwd)"/* ${bp_dir}
+  cp -a ${bp_dir}/test/fixtures/$1/. ${compile_dir}
+  capture ${bp_dir}/bin/test-compile ${compile_dir} ${2:-$(mktmpdir)} $3
+}
+
+# This is meant to be run after `compile`. `cleanupStartup` must be run
+# after this function is called before other tests are executed
+executeStartup() {
+  local env_dir=$1
+
+  # On Heroku, $HOME is the /app dir, so we need to set it to
+  # the compile_dir here
+  export HOME=${compile_dir}
+
+  # we need to set any environment variables set via the env_dir and run
+  # all of the .profile.d scripts
+  export_env_dir $env_dir
+
+  for f in ${compile_dir}/.profile.d/*; do source $f > /dev/null 2> /dev/null ; done
+}
+
+cleanupStartup() {
+  unset HOME
+  unset NODE_ENV
+  unset NODE_HOME
+  unset NODE_OPTIONS
+  unset DYNO
+  unset HEROKU_METRICS_URL
+  unset HEROKU_SKIP_NODE_PLUGIN
 }
 
 compileTest() {
@@ -912,7 +1267,7 @@ compileTest() {
   local cache_dir=${2:-$(mktmpdir)}
   local env_dir=$3
 
-  cp -a $(pwd)/* ${bp_dir}
+  cp -a "$(pwd)"/* ${bp_dir}
   cp -a ${bp_dir}/test/fixtures/$1/. ${compile_dir}
   capture ${bp_dir}/bin/test-compile ${compile_dir} ${2:-$(mktmpdir)} $3
 
@@ -941,13 +1296,13 @@ compileDir() {
   local cache_dir=${2:-$(mktmpdir)}
   local env_dir=$3
 
-  cp -a $(pwd)/* ${bp_dir}
+  cp -a "$(pwd)"/* ${bp_dir}
   capture ${bp_dir}/bin/compile ${compile_dir} ${cache_dir} ${env_dir}
 }
 
 release() {
   bp_dir=$(mktmpdir)
-  cp -a $(pwd)/* ${bp_dir}
+  cp -a "$(pwd)"/* ${bp_dir}
   capture ${bp_dir}/bin/release ${bp_dir}/test/fixtures/$1
 }
 
@@ -955,13 +1310,4 @@ assertFile() {
   assertEquals "$1" "$(cat ${compile_dir}/$2)"
 }
 
-assertDirectoryExists() {
-  if [[ ! -e "$1" ]]; then
-    fail "$1 does not exist"
-  fi
-  if [[ ! -d $1 ]]; then
-    fail "$1 is not a directory"
-  fi
-}
-
-source $(pwd)/test/shunit2
+source "$(pwd)"/test/shunit2
